@@ -1,27 +1,66 @@
-# kernel-protocol — Jupyter Kernel Wire Protocol
+# Polyglot Notebook — Single Binary Architecture
 
-## Role in Stack
-The spec. This repo defines the ZMQ message format that all Jupyter kernels
-speak. Our fork is the reference for implementing the kernel protocol bridge
-in marimo.
+## The Binary
 
-## Current State (upstream jupyter)
-- Sphinx docs describing the wire protocol
-- Message types: execute_request/reply, inspect, complete, kernel_info, etc.
-- ZMQ socket topology: shell, iopub, stdin, control, heartbeat
-- Connection files: JSON with ports, key, transport
+One `cargo build`. Ships as one executable. Contains:
 
-## Our Fork's Mission
-1. Reference spec for implementing marimo's kernel protocol client
-2. Possibly: Rust implementation of the protocol (zmq bindings + message ser/de)
-3. Test harness: verify our implementation matches the spec
+```
+reactive runtime     (transcoded from marimo Python)
+graph query engines  (transcoded from graph-notebook Python)
+kernel protocol      (Rust-native ZMQ, from kernel-protocol spec)
+document publisher   (transcoded from quarto TS/Deno)
+local graph database (lance-graph, already Rust)
+SIMD kernels         (ndarray, already Rust)
+graph compiler       (rs-graph-llm, already Rust)
+web frontend         (marimo's JS/React, served by the binary)
+```
 
-## Key Files
-- docs/messaging.rst — THE spec (message types, fields, semantics)
-- docs/kernels.rst — kernel discovery, kernelspec, lifecycle
+External process: R only (Bardioc/almato). Speaks Arrow IPC to the binary.
 
-## Integration Points
-- **marimo** → implements client side of this protocol
-- **evcxr** → existing Rust kernel that speaks this protocol
-- **IRkernel** → existing R kernel that speaks this protocol
-- **graph-notebook magics** → route through this protocol
+## Repos → Crates
+
+| Repo (source) | Becomes | Work |
+|------|---------|------|
+| marimo | `crate::runtime` + `crate::server` | Transcode Python→Rust |
+| graph-notebook | `crate::query::{cypher,gremlin,sparql,nars}` | Transcode Python→Rust |
+| kernel-protocol | `crate::kernel` | Implement from spec in Rust |
+| quarto | `crate::publish` | Transcode TS→Rust |
+| quarto-r | external R process | Stays R, Arrow IPC bridge |
+| lance-graph | `crate::graph` | Already Rust, integrate |
+| ndarray | `crate::simd` + `crate::linalg` | Already Rust, integrate |
+| rs-graph-llm | `crate::compiler` | Already Rust, fix build |
+
+## Scopes (parallel, non-overlapping)
+
+### SCOPE A: Reactive Runtime (marimo → Rust)
+Transcode marimo's reactive cell execution model to Rust.
+The core insight: cells have dependencies, when a cell's input changes,
+downstream cells re-execute. That's a DAG scheduler — natural in Rust.
+
+### SCOPE B: Query Engines (graph-notebook → Rust)
+Transcode graph-notebook's Cypher/Gremlin/SPARQL executors to Rust.
+Bolt protocol client, WebSocket client, HTTP client — all Rust-native.
+Add local path: Cypher → lance-graph semiring (no network).
+
+### SCOPE C: Kernel Protocol (kernel-protocol spec → Rust)
+Implement Jupyter kernel wire protocol in Rust.
+Only needed for R (IRkernel) — everything else runs in-process.
+ZMQ via zeromq-rs. Connection file parsing. Message ser/de.
+
+### SCOPE D: Publisher (quarto TS → Rust)
+Transcode Quarto's document rendering pipeline to Rust.
+Pandoc AST manipulation. Markdown → PDF/HTML.
+Custom graph visualization extension.
+
+### SCOPE E: Integration (lance-graph + ndarray + rs-graph-llm)
+Wire the existing Rust crates into the binary.
+Fix rs-graph-llm build. SIMD kernels for graph ops.
+This is mostly Cargo.toml workspace wiring + API surface.
+
+## Decisions
+[DECISION] One binary, no Python runtime
+[DECISION] marimo's JS frontend served by Rust HTTP server (axum/actix)
+[DECISION] R is the ONLY external process (Arrow IPC bridge)
+[DECISION] Cypher executes locally via lance-graph semiring by default
+[DECISION] Remote DB connections (Neo4j, FalkorDB) via native Bolt client
+[DECISION] vis.js graph rendering served as static assets by the binary
